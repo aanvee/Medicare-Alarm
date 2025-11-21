@@ -5,7 +5,7 @@ def listen_for_command():
     mic = sr.Microphone()
 
     with mic as source:
-        print("🎤 Listening... Please speak your command.")
+        print("Listening... Please speak your command.")
         recognizer.adjust_for_ambient_noise(source)
         audio = recognizer.listen(source)
 
@@ -14,8 +14,8 @@ def listen_for_command():
         print("You said:", command)
         return command
     except sr.UnknownValueError:
-        print("❌ Sorry, I could not understand that.")
+        print(" Sorry, I could not understand that.")
         return None
     except sr.RequestError:
-        print("⚠️ Could not connect to the speech recognition service.")
+        print(" Could not connect to the speech recognition service.")
         return None

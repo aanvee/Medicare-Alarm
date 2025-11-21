@@ -1,42 +1,95 @@
-# Final code.py  — Light themed Medication Reminder with Login/Signup (fixed)
-import os
-import openai
+import os  # To interact with OS
+import openai  # OpenAI library
 from dotenv import load_dotenv
 import json
-# Load environment variables
-load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
-#Test
-#print("OpenAI API Key:", openai.api_key)
-
 import tkinter as tk
 from tkinter import ttk, messagebox
-import csv, datetime
+import csv
+import datetime
 import dateutil.parser
 from pathlib import Path
 from ai_assistant import listen_for_command
 import platform
 import subprocess
-import pyttsx3
 
-engine = pyttsx3.init()
-engine.setProperty('rate', 175)
-engine.setProperty('volume', 1.0)
+# Load environment variables
+load_dotenv()
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
-def show_notification(title, message):
-    system = platform.system()
-    if system == "Darwin":  # macOS
+# ---------- Speak , speak/ding function ----------
+_system = platform.system().lower()
+_windows_engine = None
+
+if "windows" in _system:
+    try:
+        import pyttsx3
+        _windows_engine = pyttsx3.init()
+        _windows_engine.setProperty("rate", 175)
+        _windows_engine.setProperty("volume", 1.0)
+    except Exception as e:
+        print("pyttsx3 init failed:", e)
+        _windows_engine = None
+
+def speak(text: str):
+    """Cross-platform text-to-speech using:
+       - Windows: pyttsx3 (reused global engine)
+       - macOS: say
+       - Linux: espeak (fallback)
+    """
+    sysname = platform.system().lower()
+    if "windows" in sysname and _windows_engine:
         try:
-            os.system(f'''osascript -e 'display notification "{message}" with title "{title}"' ''')
+            _windows_engine.say(text)
+            _windows_engine.runAndWait()
         except Exception as e:
-            print("Notification error:", e)
+            print("TTS (pyttsx3) error:", e)
+    elif "darwin" in sysname:
+        try:
+            # Quote the text to avoid shell issues
+            safe = text.replace('"', "'")
+            os.system(f'say "{safe}"')
+        except Exception as e:
+            print("macOS TTS error:", e)
     else:
-        print(f"{title}: {message}")  # fallback for Windows/Linux
+        # Linux / other: try espeak
+        try:
+            subprocess.run(["espeak", text], check=False)
+        except FileNotFoundError:
+            print("(No TTS available) " + text)
+        except Exception as e:
+            print("TTS (espeak) error:", e)
+
+def speak_and_ding(text: str):
+    """Play a short notification sound if possible, then speak the text."""
+    sysname = platform.system().lower()
+    try:
+        if "windows" in sysname:
+            try:
+                import winsound
+                winsound.MessageBeep()
+            except Exception:
+                pass
+        elif "darwin" in sysname:
+            # macOS ping sound if available
+            try:
+                os.system('afplay /System/Library/Sounds/Ping.aiff')
+            except Exception:
+                pass
+        else:
+            # Linux: try to play a short sound (may not exist on all systems)
+            try:
+                subprocess.run(["aplay", "/usr/share/sounds/freedesktop/stereo/complete.oga"], check=False)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    speak(text)
 
 # ---------- Config ----------
 USERS_FILE = "users.csv"
-MEDS_FILE_TEMPLATE = "meds_{}.csv"   # per-user medication file
-REMINDER_CHECK_MS = 30_000           # 30 seconds automatic check
+MEDS_FILE_TEMPLATE = "meds_{}.csv"  # per-user medication file
+REMINDER_CHECK_MS = 30_000  # 30 seconds automatic check
 
 # ---------- Helpers ----------
 def ensure_users_file():
@@ -53,59 +106,42 @@ def ensure_user_meds(username):
     if not Path(fn).exists():
         with open(fn, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["Medication","Dosage","Frequency","Time"])  # header
+            writer.writerow(["Medication", "Dosage", "Frequency", "Time"])  # header
 
-def speak(text):
-    """Cross-platform text-to-speech."""
-    system_name = platform.system().lower()
-
-    if "windows" in system_name:
-        engine = pyttsx3.init()
-        engine.setProperty('rate', 175)
-        engine.say(text)
-        engine.runAndWait()
-    elif "darwin" in system_name:
-        # macOS built-in voice
-        os.system(f'say "{text}"')
-    else:
-        # Linux fallback
+def show_notification(title, message, parent=None):
+    """Cross-platform small notification wrapper.
+       On macOS uses osascript -> display notification.
+       On others: uses an alarm popup (if parent provided) or messagebox fallback.
+    """
+    sysname = platform.system()
+    if sysname == "Darwin":
         try:
-            subprocess.run(["espeak", text])
-        except FileNotFoundError:
-            print(f"(No TTS available) {text}")
-
-def speak_and_ding(text):
-    """Play a short notification sound, then speak text."""
-    system_name = platform.system().lower()
-
-    try:
-        if "windows" in system_name:
-            import winsound
-            winsound.MessageBeep()
-        elif "darwin" in system_name:
-            os.system('afplay /System/Library/Sounds/Ping.aiff')
-        else:
-            subprocess.run(
-                ["aplay", "/usr/share/sounds/freedesktop/stereo/complete.oga"],
-                check=False,
-            )
-    except Exception:
-        pass
-
-    speak(text)
-
-import platform
-
-def show_notification(title, message):
-    system = platform.system()
-    if system == "Darwin":  # macOS
-        try:
-            # use AppleScript to show macOS notification
-            os.system(f'''osascript -e 'display notification "{message}" with title "{title}"' ''')
+            safe_title = title.replace('"', "'")
+            safe_msg = message.replace('"', "'")
+            os.system(f'''osascript -e 'display notification "{safe_msg}" with title "{safe_title}"' ''')
         except Exception as e:
             print("Notification error:", e)
     else:
-        print(f"{title}: {message}")  # fallback for other OS
+        # Use a small topmost popup if parent provided, otherwise messagebox fallback
+        if parent is not None:
+            try:
+                show_alarm_popup(parent, message)
+            except Exception:
+                try:
+                    root = tk.Tk()
+                    root.withdraw()
+                    messagebox.showinfo(title, message)
+                    root.destroy()
+                except Exception:
+                    print(title, message)
+        else:
+            try:
+                root = tk.Tk()
+                root.withdraw()
+                messagebox.showinfo(title, message)
+                root.destroy()
+            except Exception:
+                print(title, message)
 
 def read_users():
     ensure_users_file()
@@ -122,10 +158,50 @@ def add_user(username, password):
 
 def validate_login(username, password):
     users = read_users()
-    for u,p in users:
+    for u, p in users:
         if u == username and p == password:
             return True
     return False
+
+# ---------- GUI helpers ----------
+def show_alarm_popup(parent, message):
+    """
+    Topmost alarm-style pop-up that shows the reminder and has a Dismiss button.
+    Keeps focus on top.
+    """
+    try:
+        popup = tk.Toplevel(parent)
+        popup.title("⏰ Medication Reminder")
+        popup.geometry("420x160")
+        popup.configure(bg="#FFEBEE")
+        popup.attributes("-topmost", True)
+        popup.resizable(False, False)
+
+        tk.Label(popup, text="Time to take your medication!", font=("Helvetica", 16, "bold"),
+                 bg="#FFEBEE", fg="#C62828").pack(pady=(18, 8))
+        tk.Label(popup, text=message, font=("Helvetica", 13), bg="#FFEBEE").pack(pady=(0, 10))
+
+        def dismiss():
+            try:
+                popup.destroy()
+            except Exception:
+                pass
+
+        ttk.Button(popup, text="Dismiss", command=dismiss).pack(pady=(6, 12))
+
+        # bring to front and focus
+        try:
+            popup.lift()
+            popup.focus_force()
+        except Exception:
+            pass
+
+    except Exception:
+        # fallback to simple messagebox if Toplevel fails
+        try:
+            messagebox.showinfo("Medication Reminder", message)
+        except Exception:
+            print("Reminder:", message)
 
 # ---------- GUI: Login / Signup ----------
 def open_signup(window):
@@ -135,7 +211,7 @@ def open_signup(window):
     top.configure(bg="#F7FBF9")
     top.resizable(False, False)
 
-    ttk.Label(top, text="Create an account", font=("Helvetica", 16, "bold")).pack(pady=(18,8))
+    ttk.Label(top, text="Create an account", font=("Helvetica", 16, "bold")).pack(pady=(18, 8))
 
     frm = ttk.Frame(top, padding=12)
     frm.pack()
@@ -147,22 +223,22 @@ def open_signup(window):
     ttk.Label(frm, text="Password:").grid(row=1, column=0, sticky="w", pady=6)
     ent_pass = ttk.Entry(frm, width=28, show="*")
     ent_pass.grid(row=1, column=1, pady=6)
-
+    
     def do_signup():
+        speak_and_ding("Sign up opened. Please enter username and password.")
         user = ent_user.get().strip()
-        pwd  = ent_pass.get().strip()
+        pwd = ent_pass.get().strip()
         if not user or not pwd:
             messagebox.showwarning("Missing", "Please enter username and password.")
             return
         users = read_users()
-        if any(u==user for u,_ in users):
+        if any(u == user for u, _ in users):
             messagebox.showerror("Exists", "Username already exists.")
             return
         add_user(user, pwd)
         ensure_user_meds(user)
         messagebox.showinfo("Success", "Account created! You can now login.")
         top.destroy()
-
     btn = ttk.Button(top, text="Create Account", command=do_signup)
     btn.pack(pady=14)
     speak_and_ding("Sign up opened. Please enter username and password.")
@@ -179,10 +255,10 @@ def open_login(window, on_success):
 
     # Title
     lbl_title = tk.Label(window, text="Welcome to HealthMate", font=("Helvetica", 26, "bold"), bg="#F7FBF9", fg="#2E7D32")
-    lbl_title.pack(pady=(28,6))
+    lbl_title.pack(pady=(28, 6))
 
     lbl_sub = tk.Label(window, text="Login to manage your medication reminders", font=("Helvetica", 12), bg="#F7FBF9")
-    lbl_sub.pack(pady=(0,18))
+    lbl_sub.pack(pady=(0, 18))
 
     frm = ttk.Frame(window, padding=12)
     frm.pack()
@@ -197,10 +273,10 @@ def open_login(window, on_success):
 
     def do_login():
         user = ent_user.get().strip()
-        pwd  = ent_pass.get().strip()
+        pwd = ent_pass.get().strip()
         if validate_login(user, pwd):
             speak_and_ding("Login successful. Opening your dashboard.")
-            on_success(window, user)   # <-- pass both window and username
+            on_success(window, user)  # <-- pass both window and username
         else:
             messagebox.showerror("Login failed", "Invalid username or password.")
             speak_and_ding("Login failed. Please try again.")
@@ -240,7 +316,7 @@ def open_main_app(window, username):
 
     # Header
     header = tk.Frame(window, bg="#F7FBF9")
-    header.pack(pady=(18,8))
+    header.pack(pady=(18, 8))
     tk.Label(header, text=f"Hello, {username}", font=("Helvetica", 22, "bold"), bg="#F7FBF9", fg="#2E7D32").pack()
     tk.Label(header, text="Your medication dashboard", font=("Helvetica", 12), bg="#F7FBF9").pack()
 
@@ -249,30 +325,30 @@ def open_main_app(window, username):
     center.pack(pady=12, fill="both", expand=False)
 
     left = tk.Frame(center, bg="#F7FBF9", bd=0)
-    left.grid(row=0, column=0, padx=(30,20), sticky="n")
+    left.grid(row=0, column=0, padx=(30, 20), sticky="n")
 
     right = tk.Frame(center, bg="#F7FBF9")
-    right.grid(row=0, column=1, padx=(20,30), sticky="n")
+    right.grid(row=0, column=1, padx=(20, 30), sticky="n")
 
     # Add medication card (left)
     card1 = tk.Frame(left, bg="white", bd=0, relief="raised", padx=18, pady=14)
     card1.pack()
     tk.Label(card1, text="Add Medication", font=("Helvetica", 14, "bold"), bg="white").pack(anchor="w")
-    tk.Label(card1, text="Enter details below to schedule a reminder", font=("Helvetica", 10), bg="white", fg="#5f6f66").pack(anchor="w", pady=(2,8))
+    tk.Label(card1, text="Enter details below to schedule a reminder", font=("Helvetica", 10), bg="white", fg="#5f6f66").pack(anchor="w", pady=(2, 8))
 
-    ttk.Label(card1, text="Medication name").pack(anchor="w", pady=(6,0))
+    ttk.Label(card1, text="Medication name").pack(anchor="w", pady=(6, 0))
     ent_name = ttk.Entry(card1, width=36)
     ent_name.pack(pady=4)
 
-    ttk.Label(card1, text="Dosage (e.g., 500 mg)").pack(anchor="w", pady=(6,0))
+    ttk.Label(card1, text="Dosage (e.g., 500 mg)").pack(anchor="w", pady=(6, 0))
     ent_dose = ttk.Entry(card1, width=36)
     ent_dose.pack(pady=4)
 
-    ttk.Label(card1, text="Frequency (e.g., Once daily)").pack(anchor="w", pady=(6,0))
+    ttk.Label(card1, text="Frequency (e.g., Once daily)").pack(anchor="w", pady=(6, 0))
     ent_freq = ttk.Entry(card1, width=36)
     ent_freq.pack(pady=4)
 
-    ttk.Label(card1, text="Time (24h HH:MM)").pack(anchor="w", pady=(6,0))
+    ttk.Label(card1, text="Time (24h HH:MM)").pack(anchor="w", pady=(6, 0))
     ent_time = ttk.Entry(card1, width=36)
     ent_time.pack(pady=4)
 
@@ -300,16 +376,16 @@ def open_main_app(window, username):
         ent_time.delete(0, tk.END)
         refresh_list()
 
-    ttk.Button(card1, text="Save Medication", command=save_medicine).pack(pady=(10,4))
+    ttk.Button(card1, text="Save Medication", command=save_medicine).pack(pady=(10, 4))
 
     # View medications (right)
     card2 = tk.Frame(right, bg="white", bd=0, relief="raised", padx=12, pady=12)
     card2.pack()
     tk.Label(card2, text="Scheduled Medications", font=("Helvetica", 14, "bold"), bg="white").pack(anchor="w")
-    tk.Label(card2, text="Tap a row to remove", font=("Helvetica", 10), bg="white", fg="#5f6f66").pack(anchor="w", pady=(2,8))
+    tk.Label(card2, text="Tap a row to remove", font=("Helvetica", 10), bg="white", fg="#5f6f66").pack(anchor="w", pady=(2, 8))
 
     listbox = tk.Listbox(card2, width=58, height=14, bd=0, font=("Helvetica", 12))
-    listbox.pack(pady=(6,4))
+    listbox.pack(pady=(6, 4))
 
     def refresh_list():
         listbox.delete(0, tk.END)
@@ -319,7 +395,8 @@ def open_main_app(window, username):
             reader = csv.reader(f)
             next(reader, None)
             for row in reader:
-                if not row: continue
+                if not row:
+                    continue
                 listbox.insert(tk.END, f"{row[0]}  |  {row[1]}  |  {row[2]}  |  {row[3]}")
 
     def remove_selected():
@@ -337,19 +414,20 @@ def open_main_app(window, username):
         rows.pop(i)
         with open(meds_file, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(hdr if hdr else ["Medication","Dosage","Frequency","Time"])
+            writer.writerow(hdr if hdr else ["Medication", "Dosage", "Frequency", "Time"])
             for r in rows:
                 writer.writerow(r)
         refresh_list()
         speak_and_ding("Medication removed.")
 
-    ttk.Button(card2, text="Remove Selected", command=remove_selected).pack(pady=(6,4))
-    ttk.Button(card2, text="Refresh", command=refresh_list).pack(pady=(2,8))
+    ttk.Button(card2, text="Remove Selected", command=remove_selected).pack(pady=(6, 4))
+    ttk.Button(card2, text="Refresh", command=refresh_list).pack(pady=(2, 8))
 
     # Bottom controls
     bottom = tk.Frame(window, bg="#F7FBF9")
     bottom.pack(pady=18)
-    # Voice command button
+
+    # Voice command parsing via OpenAI
     def parse_command_with_gpt(command: str):
         try:
             system_prompt = (
@@ -400,6 +478,7 @@ def open_main_app(window, username):
                 writer = csv.writer(f)
                 writer.writerow([medicine, "1 dose", frequency or "once", time_str])
             messagebox.showinfo("Reminder Set", f"Reminder set for {medicine} at {time_str}.")
+            refresh_list()
         elif action == "list":
             speak_and_ding("Here are your current reminders.")
             refresh_list()
@@ -408,9 +487,16 @@ def open_main_app(window, username):
             rows = []
             with open(meds_file, newline="") as f:
                 reader = csv.reader(f)
-                rows = [r for r in reader if r and r[0].lower() != medicine.lower()]
+                hdr = next(reader, None)
+                for r in reader:
+                    if r and r[0].lower() != medicine.lower():
+                        rows.append(r)
             with open(meds_file, "w", newline="") as f:
-                csv.writer(f).writerows(rows)
+                writer = csv.writer(f)
+                if hdr:
+                    writer.writerow(hdr)
+                for r in rows:
+                    writer.writerow(r)
             refresh_list()
         else:
             speak_and_ding("Sorry, I didn’t understand that command.")
@@ -418,7 +504,6 @@ def open_main_app(window, username):
     # Add the mic button next to other buttons
     mic_icon = ttk.Button(bottom, text="🎤 Voice Command", command=handle_voice_command)
     mic_icon.grid(row=0, column=2, padx=10)
-
 
     def check_reminders_once(show_popup=True):
         now = datetime.datetime.now().strftime("%H:%M")
@@ -429,7 +514,8 @@ def open_main_app(window, username):
             reader = csv.reader(f)
             next(reader, None)
             for r in reader:
-                if not r: continue
+                if not r:
+                    continue
                 try:
                     name, dose, freq, tstr = r
                 except ValueError:
@@ -443,12 +529,16 @@ def open_main_app(window, username):
         if triggered:
             msg = " & ".join(triggered)
             if show_popup:
-                messagebox.showinfo("Reminder", f"It's time to take: {msg}")
+                try:
+                    messagebox.showinfo("Reminder", f"It's time to take: {msg}")
+                except Exception:
+                    pass
             speak_and_ding(f"It's time to take {msg}")
-            show_notification("Medication Reminder", f"It's time to take {msg}")
-
+            # small persistent popup for clarity
+            show_real_notification("Medication Reminder", f"It's time to take {msg}", parent=window)
 
     def start_auto_check():
+        # Call once, then schedule repeated checks
         check_reminders_once(show_popup=False)
         window.after(REMINDER_CHECK_MS, start_auto_check)
 
@@ -456,6 +546,74 @@ def open_main_app(window, username):
     ttk.Button(bottom, text="Logout", command=lambda: (open_login(window, open_main_app), speak_and_ding("Logged out."))).grid(row=0, column=1, padx=10)
 
     refresh_list()
+
+    # define show_real_notification inside the same scope
+    def show_real_notification(title, message, parent=None):
+        """A persistent Windows-style notification popup (stays until dismissed)."""
+        try:
+            win = tk.Toplevel(parent or window)
+            win.overrideredirect(True)
+            win.attributes("-topmost", True)
+
+            # Size
+            width, height = 300, 140
+
+            # Position (bottom-right)
+            screen_w = win.winfo_screenwidth()
+            screen_h = win.winfo_screenheight()
+            x = screen_w - width - 20
+            y = screen_h - height - 60
+            win.geometry(f"{width}x{height}+{x}+{y}")
+
+            # Colors
+            win.configure(bg="#ffffff")
+
+            # Title
+            tk.Label(
+                win,
+                text=title,
+                font=("Segoe UI", 14, "bold"),
+                bg="#ffffff",
+                fg="#000000"
+            ).pack(pady=(12, 0))
+
+            # Message
+            tk.Label(
+                win,
+                text=message,
+                font=("Segoe UI", 11),
+                bg="#ffffff",
+                wraplength=260,
+                justify="left",
+            ).pack(pady=(6, 10))
+
+            # Dismiss button
+            dismiss_btn = tk.Button(
+                win,
+                text="Dismiss",
+                command=win.destroy,
+                bg="#D32F2F",
+                fg="white",
+                relief="flat",
+                padx=12,
+                pady=4,
+                font=("Segoe UI", 10, "bold")
+            )
+            dismiss_btn.pack()
+
+            # Bring to top
+            win.lift()
+            win.focus_force()
+        except Exception:
+            # fallback
+            try:
+                if parent:
+                    show_alarm_popup(parent, message)
+                else:
+                    messagebox.showinfo(title, message)
+            except Exception:
+                print(title, message)
+
     window.after(5_000, start_auto_check)  # start after 5s
 
 # ---------- App Start ----------
